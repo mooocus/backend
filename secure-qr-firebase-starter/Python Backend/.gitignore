@@ -1,0 +1,6 @@
+.env
+*.pem
+firebase-service-account.json
+__pycache__/
+.pytest_cache/
+.venv/

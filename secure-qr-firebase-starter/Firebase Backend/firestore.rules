@@ -1,0 +1,85 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function admin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+    function approved() {
+      return signedIn() &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'APPROVED';
+    }
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, create, update, delete: if false;
+    }
+    match /users/{uid} {
+      allow create: if signedIn() && request.auth.uid == uid &&
+        request.resource.data.keys().hasOnly(['name','email','role','status','createdAt','approvedAt','approvedBy']) &&
+        request.resource.data.keys().hasAll(['name','email','role','status','createdAt','approvedAt','approvedBy']) &&
+        request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 120 &&
+        request.resource.data.email == request.auth.token.email &&
+        request.resource.data.role == 'USER' && request.resource.data.status == 'PENDING' &&
+        request.resource.data.createdAt == request.time &&
+        request.resource.data.approvedAt == null && request.resource.data.approvedBy == null;
+      allow get: if admin() || (signedIn() && request.auth.uid == uid);
+      allow list: if admin();
+      allow update: if admin() &&
+        request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','role','approvedAt','approvedBy']) &&
+        request.resource.data.status in ['PENDING','APPROVED','REJECTED','SUSPENDED'] &&
+        request.resource.data.role in ['USER','STUDENT','RESEARCHER','STAFF'] &&
+        request.resource.data.approvedBy == request.auth.uid &&
+        request.resource.data.approvedAt == request.time;
+      allow delete: if false;
+    }
+    match /rooms/{id} {
+      allow read: if admin();
+      allow create, update: if admin() &&
+        request.resource.data.keys().hasAll(['name','enabled']) &&
+        request.resource.data.keys().hasOnly(['name','enabled','description']) &&
+        request.resource.data.name is string && request.resource.data.name.size() > 0 && request.resource.data.name.size() <= 100 &&
+        request.resource.data.enabled is bool && request.resource.data.get('description','') is string;
+      allow delete: if admin();
+    }
+    match /access_policies/{id} {
+      allow read: if admin();
+      allow create, update: if admin() &&
+        request.resource.data.keys().hasAll(['roomId','allowedRoles','startHour','endHour','bookingRequired','enabled']) &&
+        request.resource.data.keys().hasOnly(['roomId','allowedRoles','startHour','endHour','bookingRequired','enabled']) &&
+        request.resource.data.roomId is string && request.resource.data.roomId.size() > 0 &&
+        request.resource.data.allowedRoles is list && request.resource.data.allowedRoles.size() > 0 && request.resource.data.allowedRoles.size() <= 4 &&
+        request.resource.data.allowedRoles.hasOnly(['USER','STUDENT','RESEARCHER','STAFF']) &&
+        request.resource.data.startHour is int && request.resource.data.endHour is int &&
+        request.resource.data.startHour >= 0 && request.resource.data.startHour < 24 &&
+        request.resource.data.endHour > request.resource.data.startHour && request.resource.data.endHour <= 24 &&
+        request.resource.data.bookingRequired is bool && request.resource.data.enabled is bool;
+      allow delete: if admin();
+    }
+    match /bookings/{id} {
+      allow get: if admin() || (approved() && resource.data.userId == request.auth.uid);
+      allow list: if admin();
+      allow create, update: if admin() &&
+        request.resource.data.keys().hasAll(['userId','roomId','startAt','endAt','status']) &&
+        request.resource.data.keys().hasOnly(['userId','roomId','startAt','endAt','status']) &&
+        request.resource.data.userId is string && request.resource.data.roomId is string &&
+        request.resource.data.startAt is timestamp && request.resource.data.endAt is timestamp &&
+        request.resource.data.endAt > request.resource.data.startAt &&
+        request.resource.data.status in ['APPROVED','CANCELLED'];
+      allow delete: if admin();
+    }
+    match /audit_logs/{id} {
+      allow read: if admin();
+      allow create: if admin() &&
+        request.resource.data.keys().hasOnly(['type','actorUid','targetUid','outcome','details','createdAt']) &&
+        request.resource.data.keys().hasAll(['type','actorUid','targetUid','outcome','details','createdAt']) &&
+        request.resource.data.actorUid == request.auth.uid &&
+        request.resource.data.type in ['USER_DECISION','POLICY_CHANGE','ROOM_CHANGE','BOOKING_CHANGE'] &&
+        request.resource.data.targetUid is string && request.resource.data.outcome is string &&
+        request.resource.data.details is string && request.resource.data.details.size() <= 500 &&
+        request.resource.data.createdAt == request.time;
+      allow update, delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}
