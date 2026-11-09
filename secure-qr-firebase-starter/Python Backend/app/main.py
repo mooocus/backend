@@ -295,6 +295,8 @@ app.add_middleware(
     allow_headers=[
         "Authorization",
         "Content-Type",
+        "X-Scanner-ID",
+        "X-Scanner-Key",
     ],
 
     max_age=600,
