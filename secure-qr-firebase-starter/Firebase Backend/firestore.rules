@@ -3,7 +3,9 @@ service cloud.firestore {
   match /databases/{database}/documents {
     function signedIn() { return request.auth != null; }
     function admin() {
-      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+      return signedIn() &&
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.role == 'ADMIN';
     }
     function approved() {
       return signedIn() &&
@@ -79,6 +81,13 @@ service cloud.firestore {
         request.resource.data.details is string && request.resource.data.details.size() <= 500 &&
         request.resource.data.createdAt == request.time;
       allow update, delete: if false;
+    }
+    // Scanner access decisions are created only by trusted FastAPI using
+    // Firebase Admin SDK. Admins may inspect them, but browsers cannot
+    // create, update or erase access history. Admin SDK bypasses rules.
+    match /scanner_access_logs/{id} {
+      allow get, list: if admin();
+      allow create, update, delete: if false;
     }
     match /{document=**} { allow read, write: if false; }
   }
