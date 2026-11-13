@@ -18,8 +18,10 @@ service cloud.firestore {
     }
     match /users/{uid} {
       allow create: if signedIn() && request.auth.uid == uid &&
-        request.resource.data.keys().hasOnly(['name','email','role','status','createdAt','approvedAt','approvedBy']) &&
-        request.resource.data.keys().hasAll(['name','email','role','status','createdAt','approvedAt','approvedBy']) &&
+        request.resource.data.keys().hasOnly(['name','email','campusId','role','requestedRole','status','createdAt','approvedAt','approvedBy']) &&
+        request.resource.data.keys().hasAll(['name','email','campusId','role','requestedRole','status','createdAt','approvedAt','approvedBy']) &&
+        request.resource.data.campusId is string && request.resource.data.campusId.size() >= 1 && request.resource.data.campusId.size() <= 40 &&
+        request.resource.data.requestedRole in ['STUDENT','STAFF'] &&
         request.resource.data.name is string && request.resource.data.name.size() >= 1 && request.resource.data.name.size() <= 120 &&
         request.resource.data.email == request.auth.token.email &&
         request.resource.data.role == 'USER' && request.resource.data.status == 'PENDING' &&

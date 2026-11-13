@@ -376,15 +376,10 @@ function renderBookings() {
 // And corresponding Firestore Security Rules must authorize deletes.
 // Otherwise no delete occurs. Use only with disposable test logs.
 async function configureAuditMaintenance(user) {
+  // Disabled: firestore.rules has no rule for settings/auditMaintenance or for
+  // deleting audit_logs, so clearing cannot work. The button stays hidden.
   auditClearAllowed = false;
   $('clearAuditLogs').hidden = true;
-
-  const settingsDoc = await getDoc(doc(db, 'settings', 'auditMaintenance'));
-  const maintenance = settingsDoc.exists() ? settingsDoc.data() : null;
-
-  auditClearAllowed = maintenance?.enabled === true
-    && maintenance?.allowedUid === user.uid;
-  $('clearAuditLogs').hidden = !auditClearAllowed;
 }
 
 function serializeAuditEvent(event) {
