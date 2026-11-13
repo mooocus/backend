@@ -15,6 +15,9 @@ import {
   serverTimestamp,
   Timestamp,
   getDocs,
+  query,
+  orderBy,
+  limit,
 } from 'https://www.gstatic.com/firebasejs/11.10.0/firebase-firestore.js';
 import { firebaseConfig } from './firebase-config.js';
 
@@ -32,6 +35,8 @@ const emptyState = () => ({
   policies: [],
   bookings: [],
   audit: [],
+  accessLogs: [],
+  accessLogsError: '',
 });
 
 let state = emptyState();
@@ -133,18 +138,33 @@ function listen(collectionName) {
   const stateKey = {
     access_policies: 'policies',
     audit_logs: 'audit',
+    scanner_access_logs: 'accessLogs',
   }[collectionName] ?? collectionName;
 
+  // Limit the real-time scan history to prevent downloading an unbounded log
+  // collection. The server, not this browser, creates the security records.
+  const base = collection(db, collectionName);
+  const source = collectionName === 'scanner_access_logs'
+    ? query(base, orderBy('createdAt', 'desc'), limit(250))
+    : base;
+
   const unsubscribe = onSnapshot(
-    collection(db, collectionName),
+    source,
     (snapshot) => {
       state[stateKey] = snapshot.docs.map((snapshotDoc) => ({
         ...snapshotDoc.data(),
         id: snapshotDoc.id,
       }));
+      if (collectionName === 'scanner_access_logs') state.accessLogsError = '';
       render();
     },
-    (error) => flash(`${collectionName}: ${error.message}`, true),
+    (error) => {
+      if (collectionName === 'scanner_access_logs') {
+        state.accessLogsError = error.message;
+        renderAccessLogs();
+      }
+      flash(`${collectionName}: ${error.message}`, true);
+    },
   );
 
   unsubs.push(unsubscribe);
@@ -604,6 +624,7 @@ function render() {
   renderPolicies();
   renderBookings();
   renderAudit();
+  renderAccessLogs();
 
   const enabledRooms = state.rooms.filter((room) => room.enabled);
   setOptions($('policyRoom'), enabledRooms, (room) => room.name);
@@ -744,6 +765,212 @@ $('bookingForm').addEventListener('submit', async (event) => {
 });
 
 // ------------------------------------------------------------
+// Facility access logs (separate from administrative audit logs)
+// ------------------------------------------------------------
+// The original index.html does not need to be modified. Add the new
+// navigation button and panel at runtime, using textContent for log data.
+function installAccessLogUI() {
+  const auditButton = document.querySelector('[data-tab="audit"]');
+  const auditPanel = $('auditTab');
+  if (!auditButton || !auditPanel || $('accessTab')) return;
+
+  const navButton = document.createElement('button');
+  navButton.type = 'button';
+  navButton.dataset.tab = 'access';
+  navButton.setAttribute('aria-selected', 'false');
+  navButton.append(document.createTextNode('Facility access logs '));
+  const navCount = document.createElement('span');
+  navCount.id = 'accessNavCount';
+  navCount.className = 'tab-count';
+  navCount.textContent = '0';
+  navButton.append(navCount);
+  auditButton.after(navButton);
+
+  const panel = document.createElement('div');
+  panel.id = 'accessTab';
+  panel.className = 'panel';
+  panel.hidden = true;
+
+  // This markup is static. Firestore content is inserted only as text nodes.
+  panel.innerHTML = `
+    <div class="panel-heading">
+      <div>
+        <h2>Facility access logs</h2>
+        <p class="hint">Scanner decisions recorded by FastAPI. Shows the latest 250 events, newest first.</p>
+      </div>
+      <span id="accessShown" class="result-count" aria-live="polite"></span>
+    </div>
+    <div class="access-summary" aria-label="Recent access decisions">
+      <span>Granted: <strong id="accessGrantedCount">0</strong></span>
+      <span>Denied: <strong id="accessDeniedCount">0</strong></span>
+    </div>
+    <div class="filters access-filters">
+      <label for="accessSearch">Search
+        <input id="accessSearch" type="search" placeholder="Name, email, scanner or reason">
+      </label>
+      <label for="accessDecision">Decision
+        <select id="accessDecision">
+          <option value="ALL">All decisions</option>
+          <option value="GRANTED">Granted</option>
+          <option value="DENIED">Denied</option>
+        </select>
+      </label>
+      <label for="accessRoom">Facility
+        <select id="accessRoom"><option value="ALL">All facilities</option></select>
+      </label>
+    </div>
+    <div class="access-filter-actions">
+      <button id="accessClearFilters" type="button" class="muted">Clear filters</button>
+    </div>
+    <div class="table-wrap">
+      <table class="access-table">
+        <thead><tr>
+          <th>Time</th><th>User</th><th>Facility</th>
+          <th>Scanner</th><th>Decision</th><th>Reason</th>
+        </tr></thead>
+        <tbody id="accessBody"></tbody>
+      </table>
+    </div>
+    <p class="hint access-footer">Read-only history; access decisions are recorded by the backend. Scanner authentication failures or database outages may not appear here.</p>
+  `;
+  auditPanel.after(panel);
+
+  const style = document.createElement('style');
+  style.textContent = `
+    .access-summary {display:flex;gap:18px;flex-wrap:wrap;margin:15px 0 12px;color:#31506a;font-size:14px}
+    .access-summary strong {color:#12344e}
+    .access-filters {margin:12px 0 8px}
+    .access-filter-actions {margin:0 0 16px}
+    .access-table {min-width:780px}
+    .access-table td {vertical-align:middle}
+    .access-user {font-weight:600;color:#173a53}
+    .access-subtext {display:block;color:#687d8e;font-size:12px;font-weight:400;margin-top:3px}
+    .access-result {display:inline-block;border-radius:999px;padding:5px 10px;font-size:12px;font-weight:700}
+    .access-result--granted {background:#ddf5e7;color:#086c3e}
+    .access-result--denied {background:#fce3e3;color:#a52e35}
+    .access-result--unknown {background:#e6edf4;color:#3a5367}
+    .access-footer {margin-top:14px}
+  `;
+  document.head.append(style);
+
+  for (const controlId of ['accessSearch', 'accessDecision', 'accessRoom']) {
+    const control = $(controlId);
+    control.addEventListener(controlId === 'accessSearch' ? 'input' : 'change', renderAccessLogs);
+  }
+  $('accessClearFilters').addEventListener('click', () => {
+    $('accessSearch').value = '';
+    $('accessDecision').value = 'ALL';
+    $('accessRoom').value = 'ALL';
+    renderAccessLogs();
+  });
+}
+
+function scannerName(scannerId) {
+  if (!scannerId) return 'Unknown scanner';
+  // Identifiers like scanner-001 are meaningful; preserve them where possible.
+  return String(scannerId).replace(/^scanner[-_]/i, 'Scanner ');
+}
+
+function scanUserName(uid) {
+  if (!uid) return { name: 'Unverified QR', email: '' };
+  const user = state.users.find((entry) => entry.id === uid);
+  return {
+    name: user?.name || user?.email || 'User record unavailable',
+    email: user?.name ? user.email || '' : '',
+  };
+}
+
+function scanRoomName(roomId) {
+  if (!roomId) return 'Unknown facility';
+  const room = state.rooms.find((entry) => entry.id === roomId);
+  return room?.name || 'Room record unavailable';
+}
+
+function accessCell(row, primary, secondary = '') {
+  const cell = row.insertCell();
+  const name = document.createElement('span');
+  name.className = 'access-user';
+  name.textContent = primary;
+  cell.append(name);
+  if (secondary) {
+    const note = document.createElement('small');
+    note.className = 'access-subtext';
+    note.textContent = secondary;
+    cell.append(note);
+  }
+  return cell;
+}
+
+function scanMatchesSearch(event, value) {
+  const needle = value.trim().toLowerCase();
+  if (!needle) return true;
+  const user = scanUserName(event.userId);
+  return [user.name, user.email, scanRoomName(event.roomId),
+    event.scannerId, event.reason, event.decision]
+    .some((part) => String(part || '').toLowerCase().includes(needle));
+}
+
+function renderAccessLogs() {
+  const body = $('accessBody');
+  if (!body) return;
+  body.replaceChildren();
+  $('accessNavCount').textContent = `${state.accessLogs.length}${state.accessLogs.length === 250 ? '+' : ''}`;
+  $('accessGrantedCount').textContent = state.accessLogs.filter((e) => e.decision === 'GRANTED').length;
+  $('accessDeniedCount').textContent = state.accessLogs.filter((e) => e.decision === 'DENIED').length;
+
+  // Keep the filter stable as room names and logs update in real time.
+  const roomSelect = $('accessRoom');
+  const oldRoom = roomSelect.value;
+  const rooms = [...new Set(state.accessLogs.map((e) => e.roomId).filter(Boolean))]
+    .sort((a, b) => scanRoomName(a).localeCompare(scanRoomName(b)));
+  const roomOptions = [new Option('All facilities', 'ALL'),
+    ...rooms.map((id) => new Option(scanRoomName(id), id))];
+  roomSelect.replaceChildren(...roomOptions);
+  roomSelect.value = rooms.includes(oldRoom) ? oldRoom : 'ALL';
+
+  const search = $('accessSearch').value;
+  const decision = $('accessDecision').value;
+  const room = roomSelect.value;
+  const results = state.accessLogs.filter((event) =>
+    scanMatchesSearch(event, search) &&
+    (decision === 'ALL' || event.decision === decision) &&
+    (room === 'ALL' || event.roomId === room)
+  );
+  $('accessShown').textContent = `${results.length} shown / ${state.accessLogs.length} recent`;
+
+  if (state.accessLogsError) {
+    emptyRow(body, 6, `Cannot load facility logs: ${state.accessLogsError}`);
+    return;
+  }
+  if (!results.length) {
+    emptyRow(body, 6, 'No scanner access events match your filters.');
+    return;
+  }
+
+  for (const event of results) {
+    const row = body.insertRow();
+    textCell(row, formatTime(event.createdAt));
+    const user = scanUserName(event.userId);
+    accessCell(row, user.name, user.email);
+    accessCell(row, scanRoomName(event.roomId));
+    textCell(row, scannerName(event.scannerId));
+
+    const decisionCell = row.insertCell();
+    const badge = document.createElement('span');
+    const decisionValue = ['GRANTED', 'DENIED'].includes(event.decision)
+      ? event.decision : 'UNKNOWN';
+    badge.className = `access-result access-result--${decisionValue.toLowerCase()}`;
+    badge.textContent = decisionValue === 'GRANTED' ? 'Granted'
+      : decisionValue === 'DENIED' ? 'Denied' : 'Unknown';
+    decisionCell.append(badge);
+    textCell(row, event.reason || 'No reason provided');
+  }
+}
+
+// Install the navigation before registering existing tab click handlers.
+installAccessLogUI();
+
+// ------------------------------------------------------------
 // Authentication and navigation
 // ------------------------------------------------------------
 $('loginForm').addEventListener('submit', async (event) => {
@@ -766,7 +993,7 @@ function switchTab(activeTab) {
     $('userSort').value = 'newest';
     renderUsers();
   }
-  for (const tab of ['pending', 'users', 'rooms', 'policies', 'bookings', 'audit']) {
+  for (const tab of ['pending', 'users', 'rooms', 'policies', 'bookings', 'audit', 'access']) {
     $(`${tab}Tab`).hidden = tab !== activeTab;
   }
   document.querySelectorAll('[data-tab]').forEach((button) => {
@@ -830,7 +1057,7 @@ onAuthStateChanged(auth, async (user) => {
       console.warn('Audit maintenance unavailable:', error);
     }
 
-    for (const name of ['users', 'rooms', 'access_policies', 'bookings', 'audit_logs']) {
+    for (const name of ['users', 'rooms', 'access_policies', 'bookings', 'audit_logs', 'scanner_access_logs']) {
       listen(name);
     }
   } catch (error) {
