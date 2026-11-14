@@ -33,8 +33,16 @@ service cloud.firestore {
         request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status','role','approvedAt','approvedBy']) &&
         request.resource.data.status in ['PENDING','APPROVED','REJECTED','SUSPENDED'] &&
         request.resource.data.role in ['USER','STUDENT','RESEARCHER','STAFF'] &&
-        request.resource.data.approvedBy == request.auth.uid &&
-        request.resource.data.approvedAt == request.time;
+        (
+          // Role-only edits do not change approval metadata.
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['role']) ||
+          // Approval/status decisions must be stamped by the current admin.
+          (
+            request.resource.data.diff(resource.data).affectedKeys().hasAny(['status']) &&
+            request.resource.data.approvedBy == request.auth.uid &&
+            request.resource.data.approvedAt == request.time
+          )
+        );
       allow delete: if false;
     }
     match /rooms/{id} {
